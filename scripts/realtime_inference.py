@@ -15,7 +15,7 @@ from transformers import WhisperModel
 from musetalk.utils.face_parsing import FaceParsing
 from musetalk.utils.utils import datagen
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
-from musetalk.utils.blending import get_image_prepare_material, get_image_blending
+from musetalk.utils.blending import get_image_prepare_material, get_image_blending, get_image_blending_torch
 from musetalk.utils.utils import load_all_model
 from musetalk.utils.audio_processor import AudioProcessor
 
@@ -24,6 +24,7 @@ import threading
 import queue
 import time
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 
 def fast_check_ffmpeg():
@@ -82,6 +83,8 @@ class Avatar:
         self.preparation = preparation
         self.batch_size = batch_size
         self.idx = 0
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.executor = ThreadPoolExecutor(max_workers=4) # Пул для асинхронной записи
         self.init()
 
     def init(self):
@@ -144,6 +147,17 @@ class Avatar:
                 input_mask_list = glob.glob(os.path.join(self.mask_out_path, '*.[jpJP][pnPN]*[gG]'))
                 input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
                 self.mask_list_cycle = read_imgs(input_mask_list)
+                
+                # Загрузка в VRAM для GPU-блендинга
+                print("🚚 Перенос материалов в VRAM...")
+                self.frame_t_cycle = [torch.from_numpy(f).permute(2, 0, 1).float().to(self.device) for f in self.frame_list_cycle]
+                self.mask_t_cycle = []
+                for m in self.mask_list_cycle:
+                    m_t = torch.from_numpy(m).float().to(self.device) / 255.0
+                    if len(m_t.shape) == 2:
+                        m_t = m_t.unsqueeze(0)
+                    self.mask_t_cycle.append(m_t)
+                print(f"✅ {len(self.frame_t_cycle)} кадров кэшировано в GPU.")
 
     def prepare_material(self):
         print("preparing data materials ... ...")
@@ -221,15 +235,19 @@ class Avatar:
                 continue
 
             bbox = self.coord_list_cycle[self.idx % (len(self.coord_list_cycle))]
-            ori_frame = copy.deepcopy(self.frame_list_cycle[self.idx % (len(self.frame_list_cycle))])
             x1, y1, x2, y2 = bbox
-            try:
-                res_frame = cv2.resize(res_frame.astype(np.uint8), (x2 - x1, y2 - y1))
-            except:
-                continue
-            mask = self.mask_list_cycle[self.idx % (len(self.mask_list_cycle))]
-            mask_crop_box = self.mask_coords_list_cycle[self.idx % (len(self.mask_coords_list_cycle))]
-            combine_frame = get_image_blending(ori_frame,res_frame,bbox,mask,mask_crop_box)
+            
+            # GPU Blending
+            input_idx = self.idx % len(self.frame_t_cycle)
+            ori_frame_t = self.frame_t_cycle[input_idx]
+            mask_t = self.mask_t_cycle[input_idx]
+            mask_crop_box = self.mask_coords_list_cycle[input_idx]
+            
+            # res_frame здесь - это тензор [3, 256, 256] RGB [0-1]
+            combine_frame_t = get_image_blending_torch(ori_frame_t, res_frame, bbox, mask_t, mask_crop_box)
+            
+            # Конвертируем в NumPy только в самом конце для записи
+            combine_frame = combine_frame_t.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
 
             if out_frame_queue is not None:
                 out_frame_queue.put(combine_frame)
@@ -237,7 +255,8 @@ class Avatar:
             if skip_save_images is False:
                 save_dir = f"{self.avatar_path}/sequence"
                 os.makedirs(save_dir, exist_ok=True)
-                cv2.imwrite(f"{save_dir}/{str(self.idx).zfill(8)}.png", combine_frame)
+                # Асинхронная запись через пул потоков
+                self.executor.submit(cv2.imwrite, f"{save_dir}/{str(self.idx).zfill(8)}.png", combine_frame)
             self.idx = self.idx + 1
 
     @torch.no_grad()
@@ -287,7 +306,7 @@ class Avatar:
                                     timesteps,
                                     encoder_hidden_states=audio_feature_batch).sample
             pred_latents = pred_latents.to(device=device, dtype=vae.vae.dtype)
-            recon = vae.decode_latents(pred_latents)
+            recon = vae.decode_latents(pred_latents, return_tensor=True)
             for res_frame in recon:
                 if out_frame_queue is not None:
                     out_frame_queue.put(res_frame)

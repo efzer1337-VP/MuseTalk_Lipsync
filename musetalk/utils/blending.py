@@ -1,7 +1,8 @@
-from PIL import Image
 import numpy as np
 import cv2
 import copy
+import torch
+import torch.nn.functional as F
 
 
 def get_crop_box(box, expand):
@@ -126,6 +127,48 @@ def get_image_blending(image, face, face_box, mask_array, crop_box):
     blended_region = (face_large * mask + original_region * (1.0 - mask)).astype(np.uint8)
     
     out_image[y_s:y_e, x_s:x_e] = blended_region
+    return out_image
+
+
+def get_image_blending_torch(full_img_tensor, face_tensor, face_box, mask_tensor, crop_box):
+    """
+    GPU-ускоренный блендинг через PyTorch.
+    full_img_tensor: [3, H, W] BGR float [0-255] on GPU
+    face_tensor: [3, h, w] RGB float [0-1] on GPU (generated face)
+    mask_tensor: [1, h_large, w_large] float [0-1] on GPU
+    crop_box: [x_s, y_s, x_e, y_e]
+    """
+    x, y, x1, y1 = face_box
+    x_s, y_s, x_e, y_e = crop_box
+    
+    # 1. Подготавливаем сгенерированное лицо (RGB [0-1] -> BGR [0-255])
+    # Переставляем каналы и меняем порядок RGB -> BGR
+    face_bgr = face_tensor[[2, 1, 0], :, :] * 255.0
+    
+    # 2. Создаем рабочую область (face_large) из оригинального кадра
+    # full_img_tensor имеет форму [C, H, W]
+    original_region = full_img_tensor[:, y_s:y_e, x_s:x_e]
+    face_large = original_region.clone()
+    
+    # 3. Вставляем лицо в face_large
+    start_y, start_x = y - y_s, x - x_s
+    end_y, end_x = start_y + (y1 - y), start_x + (x1 - x)
+    
+    # Ресайзим face_bgr если нужно (хотя обычно он уже 256x256)
+    target_h, target_w = end_y - start_y, end_x - start_x
+    if face_bgr.shape[1] != target_h or face_bgr.shape[2] != target_w:
+        face_bgr = F.interpolate(face_bgr.unsqueeze(0), size=(target_h, target_w), mode='bilinear', align_corners=False).squeeze(0)
+    
+    face_large[:, start_y:end_y, start_x:end_x] = face_bgr
+    
+    # 4. Alpha Blending: out = face_large * mask + original_region * (1 - mask)
+    # mask_tensor ожидается [1, H_large, W_large]
+    blended_region = face_large * mask_tensor + original_region * (1.0 - mask_tensor)
+    
+    # 5. Возвращаем результат обратно в оригинальный кадр (или создаем новый)
+    out_image = full_img_tensor.clone()
+    out_image[:, y_s:y_e, x_s:x_e] = blended_region
+    
     return out_image
 
 

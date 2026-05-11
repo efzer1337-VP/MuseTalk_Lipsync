@@ -93,15 +93,21 @@ class VAE():
         init_latents = self.scaling_factor * init_latent_dist.sample()
         return init_latents
     
-    def decode_latents(self, latents):
+    def decode_latents(self, latents, return_tensor=False):
         """
         Decode latent variables back into an image.
         :param latents: The latent variables to decode.
-        :return: A NumPy array representing the decoded image.
+        :param return_tensor: Whether to return a PyTorch tensor on GPU.
+        :return: A NumPy array or a PyTorch tensor.
         """
-        latents = (1/  self.scaling_factor) * latents
+        latents = (1 / self.scaling_factor) * latents
         image = self.vae.decode(latents.to(self.vae.dtype)).sample
         image = (image / 2 + 0.5).clamp(0, 1)
+        
+        if return_tensor:
+            # Возвращаем тензор [B, C, H, W] в формате RGB
+            return image
+            
         image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
         image = (image * 255).round().astype("uint8")
         image = image[...,::-1] # RGB to BGR
