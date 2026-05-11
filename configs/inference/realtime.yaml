@@ -1,10 +1,6 @@
-avator_1:
- preparation: True # your can set it to False if you want to use the existing avator, it will save time
- bbox_shift: 5
- video_path: "data/video/yongen.mp4"
- audio_clips:
-     audio_0: "data/audio/yongen.wav"
-     audio_1: "data/audio/eng.wav"
- 
-  
-
+avatar_2: # Тот же ID, что был при подготовке
+  preparation: FALSE # ТЕПЕРЬ СТАВИМ FALSE
+  video_path: "data/video/test2_crop.mp4"
+  audio_clips: 
+    audio_0: "data/audio/audio_test.wav" # Проверьте, что этот файл существует!
+  bbox_shift: 0

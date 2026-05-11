@@ -94,19 +94,39 @@ def get_image(image, face, face_box, upper_boundary_ratio=0.5, expand=1.5, mode=
 
 
 def get_image_blending(image, face, face_box, mask_array, crop_box):
-    body = Image.fromarray(image[:,:,::-1])
-    face = Image.fromarray(face[:,:,::-1])
-
+    """
+    Быстрый блендинг лица с фоном через NumPy вместо PIL.
+    """
     x, y, x1, y1 = face_box
     x_s, y_s, x_e, y_e = crop_box
-    face_large = body.crop(crop_box)
-
-    mask_image = Image.fromarray(mask_array)
-    mask_image = mask_image.convert("L")
-    face_large.paste(face, (x-x_s, y-y_s, x1-x_s, y1-y_s))
-    body.paste(face_large, crop_box[:2], mask_image)
-    body = np.array(body)
-    return body[:,:,::-1]
+    
+    # Создаем копию кадра
+    out_image = image.copy()
+    
+    # Вырезаем область для работы (face_large)
+    # image - BGR, face - BGR
+    face_large = out_image[y_s:y_e, x_s:x_e].copy()
+    
+    # Вставляем сгенерированное лицо в face_large
+    # Рассчитываем координаты вставки внутри face_large
+    start_y, start_x = y - y_s, x - x_s
+    end_y, end_x = start_y + (y1 - y), start_x + (x1 - x)
+    
+    # Вставляем лицо (face) в нужную позицию
+    face_large[start_y:end_y, start_x:end_x] = face
+    
+    # Подготавливаем маску (она приходит в 0-255 L)
+    mask = mask_array.astype(float) / 255.0
+    if len(mask.shape) == 2:
+        mask = mask[:, :, np.newaxis]
+        
+    # Линейная интерполяция (Alpha Blending)
+    # out = face_large * mask + original_background * (1 - mask)
+    original_region = out_image[y_s:y_e, x_s:x_e]
+    blended_region = (face_large * mask + original_region * (1.0 - mask)).astype(np.uint8)
+    
+    out_image[y_s:y_e, x_s:x_e] = blended_region
+    return out_image
 
 
 def get_image_prepare_material(image, face_box, upper_boundary_ratio=0.5, expand=1.5, fp=None, mode="raw"):

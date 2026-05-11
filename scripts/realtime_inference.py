@@ -209,7 +209,7 @@ class Avatar:
 
         torch.save(self.input_latent_list_cycle, os.path.join(self.latents_out_path))
 
-    def process_frames(self, res_frame_queue, video_len, skip_save_images):
+    def process_frames(self, res_frame_queue, video_len, skip_save_images, out_frame_queue=None):
         print(video_len)
         while True:
             if self.idx >= video_len - 1:
@@ -231,18 +231,29 @@ class Avatar:
             mask_crop_box = self.mask_coords_list_cycle[self.idx % (len(self.mask_coords_list_cycle))]
             combine_frame = get_image_blending(ori_frame,res_frame,bbox,mask,mask_crop_box)
 
+            if out_frame_queue is not None:
+                out_frame_queue.put(combine_frame)
+
             if skip_save_images is False:
-                cv2.imwrite(f"{self.avatar_path}/tmp/{str(self.idx).zfill(8)}.png", combine_frame)
+                save_dir = f"{self.avatar_path}/sequence"
+                os.makedirs(save_dir, exist_ok=True)
+                cv2.imwrite(f"{save_dir}/{str(self.idx).zfill(8)}.png", combine_frame)
             self.idx = self.idx + 1
 
     @torch.no_grad()
-    def inference(self, audio_path, out_vid_name, fps, skip_save_images):
+    def inference(self, audio_path, out_vid_name, fps, skip_save_images, out_frame_queue=None):
         os.makedirs(self.avatar_path + '/tmp', exist_ok=True)
         print("start inference")
         ############################################## extract audio feature ##############################################
         start_time = time.time()
-        # Extract audio features
-        whisper_input_features, librosa_length = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
+        # Extract audio features - can now be a path or a numpy array
+        audio_feature_result = audio_processor.get_audio_feature(audio_path, weight_dtype=weight_dtype)
+        if audio_feature_result is None:
+            print("Audio feature extraction failed.")
+            return
+            
+        whisper_input_features, librosa_length = audio_feature_result
+        
         whisper_chunks = audio_processor.get_whisper_chunk(
             whisper_input_features,
             device,
@@ -259,7 +270,7 @@ class Avatar:
         res_frame_queue = queue.Queue()
         self.idx = 0
         # Create a sub-thread and start it
-        process_thread = threading.Thread(target=self.process_frames, args=(res_frame_queue, video_num, skip_save_images))
+        process_thread = threading.Thread(target=self.process_frames, args=(res_frame_queue, video_num, skip_save_images, out_frame_queue))
         process_thread.start()
 
         gen = datagen(whisper_chunks,
@@ -278,7 +289,9 @@ class Avatar:
             pred_latents = pred_latents.to(device=device, dtype=vae.vae.dtype)
             recon = vae.decode_latents(pred_latents)
             for res_frame in recon:
-                res_frame_queue.put(res_frame)
+                if out_frame_queue is not None:
+                    out_frame_queue.put(res_frame)
+                yield res_frame
         # Close the queue and sub-thread after all tasks are completed
         process_thread.join()
 
@@ -291,20 +304,8 @@ class Avatar:
                 video_num,
                 time.time() - start_time))
 
-        if out_vid_name is not None and args.skip_save_images is False:
-            # optional
-            cmd_img2video = f"ffmpeg -y -v warning -r {fps} -f image2 -i {self.avatar_path}/tmp/%08d.png -vcodec libx264 -vf format=yuv420p -crf 18 {self.avatar_path}/temp.mp4"
-            print(cmd_img2video)
-            os.system(cmd_img2video)
-
-            output_vid = os.path.join(self.video_out_path, out_vid_name + ".mp4")  # on
-            cmd_combine_audio = f"ffmpeg -y -v warning -i {audio_path} -i {self.avatar_path}/temp.mp4 {output_vid}"
-            print(cmd_combine_audio)
-            os.system(cmd_combine_audio)
-
-            os.remove(f"{self.avatar_path}/temp.mp4")
-            shutil.rmtree(f"{self.avatar_path}/tmp")
-            print(f"result is save to {output_vid}")
+        if skip_save_images is False:
+            print(f"Sequence saved to {self.avatar_path}/sequence")
         print("\n")
 
 

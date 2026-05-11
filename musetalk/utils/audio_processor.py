@@ -1,7 +1,7 @@
 import math
 import os
 
-import librosa
+import soundfile as sf
 import numpy as np
 import torch
 from einops import rearrange
@@ -12,10 +12,21 @@ class AudioProcessor:
     def __init__(self, feature_extractor_path="openai/whisper-tiny/"):
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(feature_extractor_path)
 
-    def get_audio_feature(self, wav_path, start_index=0, weight_dtype=None):
-        if not os.path.exists(wav_path):
-            return None
-        librosa_output, sampling_rate = librosa.load(wav_path, sr=16000)
+    def get_audio_feature(self, audio_input, start_index=0, weight_dtype=None):
+        if isinstance(audio_input, str):
+            if not os.path.exists(audio_input):
+                return None
+            data, sampling_rate = sf.read(audio_input)
+            # Приводим к моно, если стерео
+            if len(data.shape) > 1:
+                data = np.mean(data, axis=1)
+            # Ресемплинг здесь не делаем (предполагаем 16000), 
+            # так как T2S обычно выдает нужную частоту.
+            librosa_output = data
+        else:
+            librosa_output = audio_input
+            sampling_rate = 16000
+
         assert sampling_rate == 16000
         # Split audio into 30s segments
         segment_length = 30 * sampling_rate
